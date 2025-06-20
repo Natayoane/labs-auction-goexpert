@@ -48,6 +48,8 @@ func (bd *BidRepository) CreateBid(
 	ctx context.Context,
 	bidEntities []bid_entity.Bid) *internal_error.InternalError {
 	var wg sync.WaitGroup
+	var firstErr *internal_error.InternalError
+	var mu sync.Mutex
 	for _, bid := range bidEntities {
 		wg.Add(1)
 		go func(bidValue bid_entity.Bid) {
@@ -72,11 +74,21 @@ func (bd *BidRepository) CreateBid(
 			if okEndTime && okStatus {
 				now := time.Now()
 				if auctionStatus == auction_entity.Completed || now.After(auctionEndTime) {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = internal_error.NewBadRequestError("Cannot bid: auction is closed")
+					}
+					mu.Unlock()
 					return
 				}
 
 				if _, err := bd.Collection.InsertOne(ctx, bidEntityMongo); err != nil {
 					logger.Error("Error trying to insert bid", err)
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = internal_error.NewInternalServerError("Error trying to insert bid")
+					}
+					mu.Unlock()
 					return
 				}
 
@@ -86,9 +98,19 @@ func (bd *BidRepository) CreateBid(
 			auctionEntity, err := bd.AuctionRepository.FindAuctionById(ctx, bidValue.AuctionId)
 			if err != nil {
 				logger.Error("Error trying to find auction by id", err)
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = internal_error.NewInternalServerError("Error trying to find auction by id")
+				}
+				mu.Unlock()
 				return
 			}
 			if auctionEntity.Status == auction_entity.Completed {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = internal_error.NewBadRequestError("Cannot bid: auction is closed")
+				}
+				mu.Unlock()
 				return
 			}
 
@@ -102,12 +124,17 @@ func (bd *BidRepository) CreateBid(
 
 			if _, err := bd.Collection.InsertOne(ctx, bidEntityMongo); err != nil {
 				logger.Error("Error trying to insert bid", err)
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = internal_error.NewInternalServerError("Error trying to insert bid")
+				}
+				mu.Unlock()
 				return
 			}
 		}(bid)
 	}
 	wg.Wait()
-	return nil
+	return firstErr
 }
 
 func getAuctionInterval() time.Duration {
